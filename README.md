@@ -1,132 +1,185 @@
-# Solution
-Log in to the control plane server
-Install Packages
-## Log in to the control plane & Worker node.
+# Kubeadm Cluster Setup
 
-**Note**: The following steps must be performed on all three nodes.
+## Part A - Controller and Worker Nodes ( on 3 servers )
 
-- Create the configuration file for containerd:
+- Configure Network Prerequisites
+
+### Container Runtimes
+
+#### Forwarding IPv4 and letting iptables see bridged traffic
+- Execute the below mentioned instructions:
 ```
-cat <<EOF | sudo tee /etc/modules-load.d/containerd.conf
+cat <<EOF | sudo tee /etc/modules-load.d/k8s.conf
 overlay
 br_netfilter
 EOF
 ```
-Load the modules:
 ```
 sudo modprobe overlay
 sudo modprobe br_netfilter
 ```
-## Set the system configurations for Kubernetes networking:
+#### sysctl params required by setup, params persist across reboots
 ```
-cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-cri.conf
-net.bridge.bridge-nf-call-iptables = 1
-net.ipv4.ip_forward = 1
+cat <<EOF | sudo tee /etc/sysctl.d/k8s.conf
+net.bridge.bridge-nf-call-iptables  = 1
 net.bridge.bridge-nf-call-ip6tables = 1
+net.ipv4.ip_forward                 = 1
 EOF
 ```
-### Apply the new settings:
+#### Apply sysctl params without reboot
 ```
 sudo sysctl --system
 ```
-## Install containerd:
+- Verify that the br_netfilter, overlay modules are loaded by running the following commands:
 ```
-sudo apt-get update && sudo apt-get install -y containerd.io
+lsmod | grep br_netfilter
+lsmod | grep overlay
 ```
-### Create the default configuration file for containerd:
+- Verify that the net.bridge.bridge-nf-call-iptables, net.bridge.bridge-nf-call-ip6tables, and net.ipv4.ip_forward system variables are set to 1 in your sysctl config by running the following command:
 ```
-sudo mkdir -p /etc/containerd
+sysctl net.bridge.bridge-nf-call-iptables net.bridge.bridge-nf-call-ip6tables net.ipv4.ip_forward
 ```
-### Generate the default containerd configuration, and save it to the newly created default file:
-```
-sudo containerd config default | sudo tee /etc/containerd/config.toml
-```
-#### Restart containerd to ensure the new configuration file is used:
-```
-sudo systemctl restart containerd
-```
-**Verify that containerd is running:**
-```
-sudo systemctl status containerd
-```
-**Disable swap:**
-```
-sudo swapoff -a
+### Configure Container Runtime
 
-```
-**Install the dependency packages:**
-```
-sudo apt-get update && sudo apt-get install -y apt-transport-https curl
-```
-## Download and add the GPG key:
+- Set up Docker's apt repository.
 
+#### Add Docker's official GPG key:
+sudo apt-get update
+sudo apt-get install ca-certificates curl
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+#### Add the repository to Apt sources:
 ```
-curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.27/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
-```
-## Add Kubernetes to the repository list:
-```
-cat <<EOF | sudo tee /etc/apt/sources.list.d/kubernetes.list
-deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.27/deb/ /
-EOF
-```
-**Update the package listings:**
-```
+echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu \
+  $(. /etc/os-release && echo "$VERSION_CODENAME") stable" | \
+  sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
 sudo apt-get update
 ```
-## Install Kubernetes packages:
-
-Note: If you get a dpkg lock message, just wait a minute or two before trying the command again.
+### Install the Docker packages.
 ```
+sudo apt-get install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+### add sudo permission to docker 
+```
+sudo usermod -aG docker ubuntu
+newgrp docker
+docker images
+```
+### Make daemon file for docker to aviod service errors later
+```
+sudo mkdir /etc/docker
+cat <<EOF | sudo tee /etc/docker/daemon.json
+{
+"exec-opts": ["native.cgroupdriver=systemd"],
+"log-driver": "json-file",
+"log-opts": {
+"max-size": "100m"
+},
+"storage-driver": "overlay2"
+}
+EOF
+```
+```
+sudo systemctl enable docker
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+### Switch-off the swap in all the nodes
+```
+sudo swapoff -a
+sudo vi /etc/fstab
+```
+### Configure the containerd runtime environment.
+
+### Login as root:
+```
+sudo su -
+```
+### Create a default containerd configuration file:
+- containerd config default > /etc/containerd/config.toml
+- Open config.toml in a text editor:
+```
+vi /etc/containerd/config.toml
+```
+- Change the value of SystemdCgroup from false to true (it should be visible around line number 125 in config.toml):
+**SystemdCgroup = true**
+
+### Restart containerd
+```
+systemctl restart containerd
+```
+### Exit the sudo mode:
+exit
+
+### Installing kubeadm, kubelet and kubectl
+
+*kubeadm:* the command to bootstrap the cluster.
+
+*kubelet:* the component that runs on all of the machines in your cluster and does things like starting pods and containers.
+
+*kubectl:* the command line util to talk to your cluster.
+
+```
+sudo apt-get update
+sudo apt-get install -y apt-transport-https ca-certificates curl
+curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.28/deb/Release.key | sudo gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+
+echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.28/deb/ /' | sudo tee /etc/apt/sources.list.d/kubernetes.list
+
+sudo apt-get update
+
 sudo apt-get install -y kubelet kubeadm kubectl
 ```
-**Turn off automatic updates:**
+- kubeadm version
+- kubelet --version
+- kubectl version
+  
 ```
 sudo apt-mark hold kubelet kubeadm kubectl
 ```
-### Log in to both worker nodes to perform the previous steps.
+----------------------------------------------------------------------
+# Part B - Controller Node ONLY ( Master Node )
 
-# Initialize the Cluster
-## Initialize the Kubernetes cluster on the control plane node using kubeadm:
+## (RUN AS ROOT) Initiate API server:
 ```
-sudo kubeadm init --pod-network-cidr 192.168.0.0/16 --kubernetes-version 1.27.11
+sudo su -
+kubeadm init --apiserver-advertise-address=*<ControllerVM-PrivateIP>* --pod-network-cidr=10.244.0.0/16 
+exit
 ```
-### Set kubectl access:
+## (RUN AS NORMAL USER) Add a user for kube config:
 ```
 mkdir -p $HOME/.kube
 sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
 sudo chown $(id -u):$(id -g) $HOME/.kube/config
 ```
-### Test access to the cluster:
+## (RUN AS NORMAL USER) Deploy Weave network:
 ```
-kubectl get nodes
+kubectl apply -f https://github.com/weaveworks/weave/releases/download/v2.8.1/weave-daemonset-k8s.yaml
 ```
-## Install the Calico Network Add-On
-**On the control plane node, install Calico Networking:**
+## (RUN AS ROOT) Create cluster join command:
 ```
-kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.25.0/manifests/calico.yaml
-```
-**Check the status of the control plane node:**
-```
-kubectl get nodes
-```
-## Join the Worker Nodes to the Cluster
-**In the control plane node, create the token and copy the kubeadm join command:**
-```
+sudo su -
 kubeadm token create --print-join-command
-```
-**Note**: This output will be used as the next command for the worker nodes.
 
-- Copy the full output from the previous command used in the control plane node. This command starts with kubeadm join.
+kubeadm join <**172.31.8.221:6443**> --token 9ep3pf.ilxyyzjqku0q2il5 --discovery-token-ca-cert-hash sha256:9c482bb9d478c4ec10ce419bc27948be3eb9b38fb5c6595f135f419385fbb13e
 
-- In both worker nodes, paste the full kubeadm join command to join the cluster. Use sudo to run it as root:
-```
-sudo kubeadm join...
-```
-**In the control plane node, view the cluster status:**
-```
 kubectl get nodes
 ```
-**Note**: You may have to wait a few moments to allow all nodes to become ready.
 
-### Conclusion
-- Congratulations — you've completed this hands-on lab!
+-------------------------------------------------------------------------
+# Part C - Worker Nodes ONLY ( In Worker Node )
+
+## connecting nodes to master plane
+- Copy the output of the cluster join command from the previous step and run on the VMs designated as the worker nodes.
+```
+sudo su -
+kubeadm join 172.31.8.221:6443 --token 9ep3pf.ilxyyzjqku0q2il5 --discovery-token-ca-cert-hash sha256:9c482bb9d478c4ec10ce419bc27948be3eb9b38fb5c6595f135f419385fbb13e
+```
+### Note:we need to run the above command in our nodes to join them in cluster
+
+
+
